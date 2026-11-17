@@ -1,0 +1,125 @@
+# MindfulStudio's shared workflow (PLAN.md section 6). Client repos call it with a few lines
+# (template/.github/workflows/studio.yml):
+#
+#   jobs:
+#     studio:
+#       uses: MindfulDesign-me/studio-workflow/.github/workflows/upload.yml@v1
+#       permissions: { contents: read, id-token: write }
+#
+# Studio trusts uploads only from this file at the pinned tag (the OIDC claim job_workflow_ref), so
+# editing a client repo's copy changes nothing Studio trusts. Four jobs, so designer code never runs
+# where the upload token can be asked for (review M12):
+#   build   runs the repo's build. No token.
+#   shots   renders the built pages for screenshots (runs the designs' JavaScript). No token.
+#   studio  runs only this repo's pinned code, with Node and no packages: checks, upload. Has the token.
+#   report  tells Studio when any of them failed (review B3).
+# Actions are pinned to commit SHAs (v4 releases).
+name: MindfulStudio
+
+on:
+  workflow_call: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: studio-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  STUDIO_URL: https://studio.mindfuldesign.me
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      # This repo (studio-workflow) is public: it holds no secrets, and public is what lets every
+      # client repo's runner check it out.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - name: Install the repo's packages (only if it has a lockfile)
+        run: if [ -f package-lock.json ]; then npm ci --ignore-scripts; fi
+      - name: Build every round named in studio.json
+        run: node .studio/scripts/build.mjs studio.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: dist, path: dist, retention-days: 3, if-no-files-found: error }
+
+  shots:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true   # screenshots are nice to have; a save never fails for want of them
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { persist-credentials: false }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: dist, path: dist }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - run: npm ci --prefix .studio --ignore-scripts
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with: { path: ~/.cache/ms-playwright, key: playwright-${{ hashFiles('.studio/package-lock.json') }} }
+      - run: npx --prefix .studio playwright install --with-deps chromium
+      - name: Screenshots
+        run: mkdir -p shots && (node .studio/scripts/shots.mjs studio.json dist shots > shots/screenshots.json || echo '[]' > shots/screenshots.json)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: shots, path: shots, retention-days: 3 }
+
+  studio:
+    needs: [build, shots]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # the OIDC token that proves this upload came from here
+    steps:
+      - name: Get Studio's own code (pinned)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+      - name: Get studio.json and the files to scan for secrets (read only, never run)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { path: repo, persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with: { name: dist, path: dist }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with: { name: shots, path: shots }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - name: Checks
+        run: node .studio/scripts/check.mjs repo/studio.json dist repo > checks.json
+      - name: Upload to MindfulStudio
+        env: { COMMIT_MESSAGE: "${{ github.event.head_commit.message }}" }
+        run: node .studio/scripts/upload.mjs repo/studio.json dist checks.json shots/screenshots.json
+
+  report:
+    needs: [build, shots, studio]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - name: Tell Studio it failed
+        env:
+          RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          FAILED_STEP: "${{ needs.build.result != 'success' && 'the build' || 'the upload' }}"
+          COMMIT_MESSAGE: "${{ github.event.head_commit.message }}"
+        run: node .studio/scripts/report-failure.mjs
