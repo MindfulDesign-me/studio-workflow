@@ -69,7 +69,7 @@ jobs:
         with: { node-version: 22 }
       - run: npm ci --prefix .studio --ignore-scripts
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with: { path: ~/.cache/ms-playwright, key: playwright-${{ hashFiles('.studio/package-lock.json') }} }
+        with: { path: ~/.cache/ms-playwright, key: "playwright-${{ hashFiles('.studio/package-lock.json') }}" }
       - run: npx --prefix .studio playwright install --with-deps chromium
       - name: Screenshots
         run: mkdir -p shots && (node .studio/scripts/shots.mjs studio.json dist shots > shots/screenshots.json || echo '[]' > shots/screenshots.json)
