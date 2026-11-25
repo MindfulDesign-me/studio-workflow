@@ -77,8 +77,39 @@ async function printPage(context, url, kind, file, jpgFile) {
         await page.pdf({ path: file, width: '1920px', height: '1080px', printBackground: true, margin: { top: 0, right: 0, bottom: 0, left: 0 }, pageRanges: '1', preferCSSPageSize: false });
         await page.screenshot({ path: jpgFile, type: 'jpeg', quality: 80 });
       } else {
-        const scale = Math.round(((A4_PX.w - 2 * mmToPx(MARGIN_MM.side)) / DOC_LAYOUT_PX) * 1000) / 1000;
-        await page.pdf({ path: file, format: 'A4', printBackground: true, scale, margin: { top: `${MARGIN_MM.top}mm`, bottom: `${MARGIN_MM.bottom}mm`, left: `${MARGIN_MM.side}mm`, right: `${MARGIN_MM.side}mm` } });
+        // A document that was designed to be printed says so (an @page rule or @media print styles: sheets
+        // with their own size, margins and page breaks). Print it as it asked: print media, its own page
+        // size, no scaling. One that has none (a long web page) is laid out about 1024 px wide and scaled onto A4.
+        const print = await page.evaluate(() => {
+          const seen = { page: false, media: false };
+          for (const sheet of document.styleSheets) {
+            let rules; try { rules = sheet.cssRules; } catch { continue; }
+            for (const r of rules) {
+              if (r instanceof CSSPageRule) seen.page = true;
+              else if (r instanceof CSSMediaRule && /(^|[\s,(])print\b/.test(r.media.mediaText)) { seen.media = true; for (const x of r.cssRules) if (x instanceof CSSPageRule) seen.page = true; }
+            }
+          }
+          return seen;
+        });
+        if (print.page || print.media) {
+          // A printed sheet is narrower than a phone breakpoint (letter is 816 px), so a design's
+          // "max-width" rules for narrow screens would switch its phone layout on. Drop them: paper is not a phone.
+          await page.evaluate(() => {
+            for (const sheet of document.styleSheets) {
+              let rules; try { rules = sheet.cssRules; } catch { continue; }
+              for (let i = rules.length - 1; i >= 0; i--) {
+                const r = rules[i];
+                if (r instanceof CSSMediaRule && /max-(device-)?width/.test(r.media.mediaText) && !/\bprint\b/.test(r.media.mediaText)) sheet.deleteRule(i);
+              }
+            }
+          });
+          await page.emulateMedia({ media: 'print' });
+          const m = print.page ? undefined : { top: `${MARGIN_MM.top}mm`, bottom: `${MARGIN_MM.bottom}mm`, left: `${MARGIN_MM.side}mm`, right: `${MARGIN_MM.side}mm` };
+          await page.pdf({ path: file, format: 'A4', preferCSSPageSize: true, printBackground: true, ...(m ? { margin: m } : {}) });
+        } else {
+          const scale = Math.round(((A4_PX.w - 2 * mmToPx(MARGIN_MM.side)) / DOC_LAYOUT_PX) * 1000) / 1000;
+          await page.pdf({ path: file, format: 'A4', printBackground: true, scale, margin: { top: `${MARGIN_MM.top}mm`, bottom: `${MARGIN_MM.bottom}mm`, left: `${MARGIN_MM.side}mm`, right: `${MARGIN_MM.side}mm` } });
+        }
       }
     })(), PAGE_MS, 'The page');
   } finally { await page.close().catch(() => {}); }
