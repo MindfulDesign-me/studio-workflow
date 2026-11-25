@@ -70,6 +70,14 @@ Helvetica Neue or Georgia prints in the runner's fallback font; if that matters,
 
 ## Rollout order
 
+**Smart downloads change (EXPORT_REV 4, "Web page", decks kept in one page): the order is the other way round.**
+Move the `v2` tag to the new workflow FIRST (the current server accepts its files as they are), then deploy the
+server (it raises `EXPORT_REV`, so every round's downloads are made again on its next save), then re-run each
+repo's workflow. The other way round, a save made by the old scripts after the deploy would keep its old
+one-page deck PDF under the new revision and the re-run would skip it.
+
+First rollout, in this order:
+
 1. Deploy the Studio server from this branch first. It only accepts `exports`; saves from the old workflow
    are unchanged.
 2. Commit the workflow change to `studio-workflow` and create the tag `v2` (admins only; `v1` stays as it is).
@@ -105,6 +113,11 @@ steps 2 to 4 and 6. `WORKFLOW_REFS` is then untouched.
   Residual risk: font programs and JPEG data are passed through unread, so a flaw in a viewer's own font or
   JPEG code is not something this step can see.
 - PowerPoint (presentations only): every slide a full-slide 16:9 picture, the page name as the slide's notes.
+  A deck kept in ONE page (a script shows one slide at a time) that has its own `@page` print rules is printed
+  as it asks, a PDF page for each slide (`"paged": true` in its manifest, believed only for a deck of one page);
+  it has no slide pictures, so no PowerPoint. A one-page deck without print rules stays one slide, as before.
+- The "Web page" download (HTML) is not made here: Studio puts it together from the saved files when it is
+  downloaded (docs/download-types-plan.md).
 - Word source (`wordsrc`, proposals and documents only; **internal**: never listed or downloaded by people).
   Word files are made on the Studio server on first download: Claude tidies the page's text into an outline and
   a Mindful-styled template writes the .docx. The workflow's part is to deliver the text and pictures of the

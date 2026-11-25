@@ -151,8 +151,9 @@ async function readWord(page, context, wc, n, t0) {
   }
 }
 
-// wc: the Word reading of this option (proposals and documents), or null. Returns { word, figures, notes }.
-async function printPage(context, url, kind, file, jpgFile, wc, pageNo) {
+// wc: the Word reading of this option (proposals and documents), or null. pagedOk: a deck that is one page
+// in all (it may print itself as many). Returns { word, figures, notes, paged }.
+async function printPage(context, url, kind, file, jpgFile, wc, pageNo, pagedOk = false) {
   const page = await context.newPage();
   try {
     const t0 = Date.now();
@@ -161,24 +162,36 @@ async function printPage(context, url, kind, file, jpgFile, wc, pageNo) {
       await page.emulateMedia({ media: 'screen' });
       await settle(page, url);
       if (wc) got = await readWord(page, context, wc, pageNo, t0);
+      // Does the page say how to print it (an @page rule, or @media print styles)?
+      const printRules = () => page.evaluate(() => {
+        const seen = { page: false, media: false };
+        for (const sheet of document.styleSheets) {
+          let rules; try { rules = sheet.cssRules; } catch { continue; }
+          for (const r of rules) {
+            if (r instanceof CSSPageRule) seen.page = true;
+            else if (r instanceof CSSMediaRule && /(^|[\s,(])print\b/.test(r.media.mediaText)) { seen.media = true; for (const x of r.cssRules) if (x instanceof CSSPageRule) seen.page = true; }
+          }
+        }
+        return seen;
+      });
       if (kind === 'presentation') {
-        await page.pdf({ path: file, width: '1920px', height: '1080px', printBackground: true, margin: { top: 0, right: 0, bottom: 0, left: 0 }, pageRanges: '1', preferCSSPageSize: false });
-        await page.screenshot({ path: jpgFile, type: 'jpeg', quality: 80 });
+        // A deck kept in ONE scripted page (its slides shown by a script, with a strip of thumbnails beside
+        // them) would print as one page: the slide on screen and the strip. If that page has its own print
+        // rules (@page), it says how to print every slide: print it as it asks, a page for each slide. There
+        // are no pictures of the slides then, so no PowerPoint (assemble.mjs, manifest "paged").
+        if (pagedOk && (await printRules()).page) {
+          await page.emulateMedia({ media: 'print' });
+          await page.pdf({ path: file, preferCSSPageSize: true, printBackground: true });
+          got.paged = true;
+        } else {
+          await page.pdf({ path: file, width: '1920px', height: '1080px', printBackground: true, margin: { top: 0, right: 0, bottom: 0, left: 0 }, pageRanges: '1', preferCSSPageSize: false });
+          await page.screenshot({ path: jpgFile, type: 'jpeg', quality: 80 });
+        }
       } else {
         // A document that was designed to be printed says so (an @page rule or @media print styles: sheets
         // with their own size, margins and page breaks). Print it as it asked: print media, its own page
         // size, no scaling. One that has none (a long web page) is laid out about 1024 px wide and scaled onto A4.
-        const print = await page.evaluate(() => {
-          const seen = { page: false, media: false };
-          for (const sheet of document.styleSheets) {
-            let rules; try { rules = sheet.cssRules; } catch { continue; }
-            for (const r of rules) {
-              if (r instanceof CSSPageRule) seen.page = true;
-              else if (r instanceof CSSMediaRule && /(^|[\s,(])print\b/.test(r.media.mediaText)) { seen.media = true; for (const x of r.cssRules) if (x instanceof CSSPageRule) seen.page = true; }
-            }
-          }
-          return seen;
-        });
+        const print = await printRules();
         if (print.page || print.media) {
           // A printed sheet is narrower than a phone breakpoint (letter is 816 px), so a design's
           // "max-width" rules for narrow screens would switch its phone layout on. Drop them: paper is not a phone.
@@ -246,8 +259,9 @@ try {
             if (over()) { problem(`Page "${pg.name}" and the pages after it were skipped: the time for making downloads (${budgetText}) ran out.`); break; }
             const n = pad(i + 1), file = path.join(dir, `p${n}.pdf`), jpgFile = path.join(dir, `p${n}.jpg`);
             try {
-              const got = await printPage(context, `${base}/${r.root}/${o.slug}/${pg.path}`, kind, file, jpgFile, wc, i + 1);
-              manifest.pages.push({ slug: pg.slug, name: pg.name, pdf: `p${n}.pdf`, ...(kind === 'presentation' ? { jpg: `p${n}.jpg` } : {}), ...(got?.word ? { word: got.word, figures: got.figures } : {}) });
+              const got = await printPage(context, `${base}/${r.root}/${o.slug}/${pg.path}`, kind, file, jpgFile, wc, i + 1, pages.length === 1);
+              if (got?.paged) manifest.paged = true;
+              manifest.pages.push({ slug: pg.slug, name: pg.name, pdf: `p${n}.pdf`, ...(kind === 'presentation' && !got?.paged ? { jpg: `p${n}.jpg` } : {}), ...(got?.word ? { word: got.word, figures: got.figures } : {}) });
               for (const m of got?.notes || []) problem(`Word copy, page "${pg.name}": ${m}`);
               made++;
             } catch (e) { problem(`Page "${pg.name}" could not be made into a file: ${oneLine(e)}.`); fs.rmSync(file, { force: true }); fs.rmSync(jpgFile, { force: true }); break; }

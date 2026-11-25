@@ -121,7 +121,9 @@ function readManifest(dir, expected) {
     words.push(good ? { word: e.word, figures: [...figs] } : null);
   }
   while (words.length < expected.length) words.push(null);
-  return { ok, notes, words };
+  // "paged": a deck kept in one page that printed itself as a page for each slide (exports.mjs). Only believed
+  // for a deck of one page; it only relaxes "one slide per file", never what a PDF may hold (pdf-clean.mjs).
+  return { ok, notes, words, paged: m?.paged === true && expected.length === 1 };
 }
 
 // ---- PowerPoint ---------------------------------------------------------------------------------
@@ -232,7 +234,8 @@ for (const it of plan) {
     reserve(dir, m.ok.map((e) => [e.pdf, MAX_PAGE_PDF]), MAX_OPTION_BYTES);
     const pdfPages = m.ok.map((e) => ({ name: e.name, bytes: readPlain(dir, e.pdf, MAX_PAGE_PDF) }));
     for (const [i, pg] of pdfPages.entries()) if (!isPdf(pg.bytes)) throw new Error(`${m.ok[i].pdf} is not a real PDF`);
-    const single = p.type === 'presentation';
+    const paged = p.type === 'presentation' && m.paged;       // slides printed by the page itself: PDF only
+    const single = p.type === 'presentation' && !paged;
     const res = await buildPdfSafely(
       { pages: pdfPages, title: p.name, dateMs: roundDate(r).getTime(), single, maxPages: single ? MAX_PAGES : MAX_PRINTED_PAGES, slides: single },
       { timeoutMs: Math.max(10e3, Math.min(90e3, timeLeft())) });
@@ -242,7 +245,7 @@ for (const it of plan) {
     keep({ p, r, o, kind: 'pdf', bytes: Buffer.from(res.bytes), pages: res.pages });
   } catch (e) { problem(`No PDF for ${tag}: ${String(e.message).split('\n')[0]}.`); }
   // PowerPoint (presentations)
-  if (p.type === 'presentation') {
+  if (p.type === 'presentation' && !m.paged) {
     try {
       if (m.ok.some((e) => !e.jpg)) throw new Error(`"${m.ok.find((e) => !e.jpg).name}" has no picture`);
       reserve(dir, m.ok.map((e) => [e.jpg, MAX_JPG]), MAX_FILE - MB);     // a picture is not compressed further
