@@ -2,8 +2,9 @@
 
 The shared workflow YAML lives in `MindfulDesign-me/studio-workflow` (`.github/workflows/upload.yml`), not here.
 This repo's `workflow/` folder is what becomes that repo's `scripts/` and `package.json`. Copy it over first
-(`scripts/exports.mjs`, `scripts/assemble.mjs`, `scripts/pdf-clean.mjs`, the changed `scripts/lib.mjs` and
-`scripts/upload.mjs`, `package.json`, `package-lock.json`). Job names below are roles; use the names the YAML already has.
+(`scripts/exports.mjs`, `scripts/assemble.mjs`, `scripts/pdf-clean.mjs`, `scripts/word-extract.mjs`,
+`scripts/word-src.mjs`, the changed `scripts/lib.mjs` and `scripts/upload.mjs`, `package.json`,
+`package-lock.json`). Job names below are roles; use the names the YAML already has.
 
 ## The three steps
 
@@ -104,6 +105,25 @@ steps 2 to 4 and 6. `WORKFLOW_REFS` is then untouched.
   Residual risk: font programs and JPEG data are passed through unread, so a flaw in a viewer's own font or
   JPEG code is not something this step can see.
 - PowerPoint (presentations only): every slide a full-slide 16:9 picture, the page name as the slide's notes.
+- Word source (`wordsrc`, proposals and documents only; **internal**: never listed or downloaded by people).
+  Word files are made on the Studio server on first download: Claude tidies the page's text into an outline and
+  a Mindful-styled template writes the .docx. The workflow's part is to deliver the text and pictures of the
+  pages as one JSON file per round and option, `<project>__round-<n>__<option>__wordsrc.json`, listed in
+  `exports.json` with `kind: "wordsrc"` and `pages: 0`, and sent by `upload.mjs` like the other files (a blob
+  that fails to go up is a warning; at most 12 MB; the first byte must be `{`). Format and caps are in the
+  header of `scripts/word-src.mjs`: blocks `page`, `h` (1 to 3), `p` (with `**bold**` runs), `li`, `table` (the
+  header row first), `fig` (a PNG, at most 20, each at most 2400 x 1600 px and 1.5 MB); at most 3000 blocks,
+  4000 characters a text (longer paragraphs are split, not cut), 400 KB of text, 200 list items, a table of
+  200 rows x 12 columns.
+  The two steps: `exports.mjs` runs `scripts/word-extract.mjs` inside each page (screen media, after the page
+  has settled and before it is printed) and writes `word-pNNN.json` and `wNNN-fMM.png` (element screenshots)
+  beside the PDF pages, named in the page's entry in `manifest.json`; it reads the rendered DOM only, skips
+  nav, buttons, form controls and everything hidden, and any failure is a note in the manifest, never a lost PDF.
+  `assemble.mjs` re-derives every name, reads the files like the PDF pages (no symlinks, sizes first), checks the
+  schema and caps strictly (a wrong shape, a block count over the cap, a fake or oversize PNG: the whole Word
+  source is left out with a plain problem; text that is too long is split and the text over 400 KB is dropped
+  with a note), rebuilds each PNG from an allow-list of chunks, and writes the same bytes for the same material.
+  The PDF and the Word source are independent: either can be made without the other.
 - At most 80 pages per option, 25 MB per file. A bigger or broken file is left out and named in the checks.
 - Only projects whose `type` in `studio.json` is `proposal`, `document` or `presentation` get files.
 - Nothing from `studio.json` reaches a path unchecked (`exportPlan` in `scripts/lib.mjs`, used by both steps):

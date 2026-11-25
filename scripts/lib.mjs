@@ -32,7 +32,8 @@ export function fail(msg) { console.error(`::error::${msg}`); process.exit(1); }
 // Downloads (docs/download-plan.md): the types that have PDF and PowerPoint files, the most pages one
 // option may print, and what studio.json may put into a path. Shared by exports.mjs, assemble.mjs, upload.mjs.
 export const EXPORT_TYPES = ['proposal', 'document', 'presentation'];
-export const MAX_PAGES = 80;             // pages of a round that are printed (a slide is one page)
+export const WORD_TYPES = ['proposal', 'document'];   // the types that also get a Word source (word-src.mjs)
+export const MAX_PAGES = 80;            // pages of a round that are printed (a slide is one page)
 export const MAX_PRINTED_PAGES = 200;    // PDF pages in one option's file (a proposal page runs over several)
 export const MAX_ROUNDS = 200, MAX_OPTIONS = 4;   // the server's limits (server/lib/studiojson.js)
 // Keep in step with SLUG_RE in server/lib/util.js: lowercase letters, numbers and hyphens.

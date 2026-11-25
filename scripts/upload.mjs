@@ -44,21 +44,25 @@ if (exportsFile && fs.existsSync(exportsFile)) {
   let listed = {};
   try { listed = JSON.parse(fs.readFileSync(exportsFile, 'utf8') || '{}'); } catch { exportProblems.push('The list of PDF and PowerPoint files could not be read, so none were sent.'); }
   for (const m of (Array.isArray(listed.problems) ? listed.problems : []).slice(0, 40)) exportProblems.push(String(m).slice(0, 280));
-  const KIND_MAGIC = { pdf: [0x25, 0x50, 0x44, 0x46, 0x2d], pptx: [0x50, 0x4b, 0x03, 0x04] };
+  // "wordsrc" is the Word source (workflow/EXPORTS.md): internal, for proposals and documents, a JSON file of at most 12 MB.
+  const KIND_MAGIC = { pdf: [0x25, 0x50, 0x44, 0x46, 0x2d], pptx: [0x50, 0x4b, 0x03, 0x04], wordsrc: [0x7b] };
+  const LABEL = { pdf: 'PDF', pptx: 'PowerPoint', wordsrc: 'Word copy' };
   for (const e of (Array.isArray(listed.files) ? listed.files : []).slice(0, 400)) {
-    const what = `${e?.kind === 'pptx' ? 'PowerPoint' : 'PDF'} for ${String(e?.project).slice(0, 60)} round ${Number(e?.round) || '?'}`;
+    const what = `${LABEL[e?.kind] || 'PDF'} for ${String(e?.project).slice(0, 60)} round ${Number(e?.round) || '?'}`;
     const skip = (why) => exportProblems.push(`The ${what} was left out: ${why}.`);
     const p = studio.projects.find((x) => x.slug === e?.project);
     const r = p?.rounds.find((x) => x.number === e.round);
     const type = exportType(p);
     if (!r || !r.options.some((o) => o.slug === e.option)) { skip('it is not for a round and option in studio.json'); continue; }
-    if (!KIND_MAGIC[e.kind] || !(e.kind === 'pdf' ? type : type === 'presentation' && e.kind === 'pptx')) { skip('that kind of file is not made for this type of project'); continue; }
+    const kindOk = e.kind === 'pdf' ? !!type : e.kind === 'pptx' ? type === 'presentation' : e.kind === 'wordsrc' ? type === 'proposal' || type === 'document' : false;
+    if (typeof e.kind !== 'string' || !Object.hasOwn(KIND_MAGIC, e.kind) || !kindOk) { skip('that kind of file is not made for this type of project'); continue; }
     const abs = path.resolve(dir, String(e.file || ''));
     if (!/^[A-Za-z0-9._-]+$/.test(String(e.file)) || path.dirname(abs) !== dir) { skip('its file name is not a plain name'); continue; }
     const st = fs.lstatSync(abs, { throwIfNoEntry: false });
     if (!st) { skip('the file is missing'); continue; }
     if (!st.isFile() || st.isSymbolicLink()) { skip('it is not a plain file'); continue; }
-    if (st.size < 8 || st.size > 25 * 1048576) { skip(st.size < 8 ? 'the file is empty' : `it is ${Math.round(st.size / 1048576)} MB and the limit is 25 MB`); continue; }
+    const limit = e.kind === 'wordsrc' ? 12 : 25;
+    if (st.size < 8 || st.size > limit * 1048576) { skip(st.size < 8 ? 'the file is empty' : `it is ${Math.round(st.size / 1048576)} MB and the limit is ${limit} MB`); continue; }
     const buf = fs.readFileSync(abs);
     if (!KIND_MAGIC[e.kind].every((b, i) => buf[i] === b)) { skip('it is not a real file of that kind'); continue; }
     if (e.kind === 'pptx' && (!buf.includes('[Content_Types].xml') || buf.includes('vbaProject.bin'))) { skip('it did not pass the file check'); continue; }
@@ -99,7 +103,7 @@ console.log(`Upload ${start.id}: ${files.length} files, ${start.missing.length} 
 let n = 0;
 for (const h of start.missing) {
   // Only what the server asked for. A download that fails to go up is a warning: the save carries on without it.
-  if (exportShas.has(h)) { if (await call('PUT', `/api/uploads/${start.id}/blobs/${h}`, fs.readFileSync(where.get(h)), start.uploadToken, 'application/octet-stream', true) == null) console.log('::warning::A PDF or PowerPoint file could not be sent, so it will be missing from the downloads.'); continue; }
+  if (exportShas.has(h)) { if (await call('PUT', `/api/uploads/${start.id}/blobs/${h}`, fs.readFileSync(where.get(h)), start.uploadToken, 'application/octet-stream', true) == null) console.log('::warning::A PDF, PowerPoint or Word file could not be sent, so it will be missing from the downloads.'); continue; }
   await call('PUT', `/api/uploads/${start.id}/blobs/${h}`, fs.readFileSync(where.get(h)), start.uploadToken, 'application/octet-stream');
   if (++n % 100 === 0) console.log(`  ${n} of ${start.missing.length}`);
 }

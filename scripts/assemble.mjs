@@ -8,21 +8,28 @@
 // reading the manifest), bytes per file, per option and per run, and the wall-clock time of the run (the
 // newest rounds come first, so what runs out is the oldest).
 //   node assemble.mjs studio.json exports-src outdir
+// Proposals and documents also get a Word source (kind "wordsrc", word-src.mjs): the text and pictures that
+// exports.mjs read out of the pages, checked strictly and merged in studio.json's page order into one JSON
+// file per option. It is internal (people never see it); a wordsrc that fails any check is left out with a
+// plain problem, and the PDF is not affected either way.
 // Writes outdir/exports.json: { files: [{ project, round, option, kind, file, sha256, size, pages }], problems: [text] }
+// (kind: pdf, pptx or wordsrc; a wordsrc has pages 0)
 // Env (for tests): STUDIO_ASSEMBLE_BUDGET_MS (default 4 minutes), STUDIO_ASSEMBLE_MAX_BYTES (default 600 MB).
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import pptxgen from 'pptxgenjs';
 import JSZip from 'jszip';
-import { readStudio, exportPlan, MAX_PAGES, MAX_PRINTED_PAGES } from './lib.mjs';
+import { readStudio, exportPlan, MAX_PAGES, MAX_PRINTED_PAGES, WORD_TYPES } from './lib.mjs';
 import { buildPdfSafely } from './pdf-clean.mjs';
+import { CAPS, buildWordSource } from './word-src.mjs';
 
 const MB = 1048576;
 const MAX_FILE = 25 * MB;                // the most Studio accepts for one file
 const MAX_PAGE_PDF = 20 * MB;            // one printed page file
 const MAX_JPG = 4 * MB;                  // one slide picture
 const MAX_OPTION_BYTES = 150 * MB;       // everything read for one file of one option
+const MAX_WORD_READ = 40 * MB;           // everything read for the Word source of one option (20 pictures of at most 1.5 MB, and the text)
 const MAX_RUN_BYTES = Number(process.env.STUDIO_ASSEMBLE_MAX_BYTES) || 600 * MB;    // everything read in this run
 const BUDGET_MS = Number(process.env.STUDIO_ASSEMBLE_BUDGET_MS) || 4 * 60e3;        // the whole run
 const FIXED_DATE = new Date('2026-01-01T00:00:00Z');
@@ -102,7 +109,19 @@ function readManifest(dir, expected) {
     if (!e || e.slug !== pg.slug || e.pdf !== `p${pad(i + 1)}.pdf` || (e.jpg != null && e.jpg !== `p${pad(i + 1)}.jpg`)) break;
     ok.push({ n: i + 1, slug: pg.slug, name: String(pg.name || pg.slug).slice(0, 120), pdf: e.pdf, jpg: e.jpg || null });
   }
-  return { ok, notes };
+  // Word source: the file names are made here from the page's number, and the manifest's are only compared
+  // with them (and the number of pictures it names is bounded before it is used): a name that is not exactly
+  // the expected one means that page has no text for Word. words[i] is null for a page without.
+  const words = [];
+  for (const [i, pg] of expected.entries()) {
+    const e = Array.isArray(m?.pages) ? m.pages[i] : null;
+    if (!e || e.slug !== pg.slug) break;
+    const n = pad(i + 1), figs = Array.isArray(e.figures) && e.figures.length <= CAPS.figures ? e.figures : null;
+    const good = e.word === `word-p${n}.json` && figs && figs.every((f, j) => f === `w${n}-f${String(j + 1).padStart(2, '0')}.png`);
+    words.push(good ? { word: e.word, figures: [...figs] } : null);
+  }
+  while (words.length < expected.length) words.push(null);
+  return { ok, notes, words };
 }
 
 // ---- PowerPoint ---------------------------------------------------------------------------------
@@ -137,11 +156,13 @@ async function buildPptx({ title, date, slides }) {
 
 // ---- the rounds ---------------------------------------------------------------------------------
 const roundDate = (r) => (r.date ? new Date(`${r.date}T12:00:00Z`) : FIXED_DATE);
+const LABEL = { pdf: 'PDF', pptx: 'PowerPoint', wordsrc: 'Word copy' };
 function keep({ p, r, o, kind, bytes, pages }) {
-  const where = `${kind === 'pdf' ? 'PDF' : 'PowerPoint'} for ${p.name} round ${r.number} (${o.name})`;
-  if (bytes.length > MAX_FILE) return problem(`The ${where} was left out: it is ${mbText(bytes.length)} and the limit is 25 MB.`);
+  const where = `${LABEL[kind]} for ${p.name} round ${r.number} (${o.name})`;
+  const cap = kind === 'wordsrc' ? CAPS.fileBytes : MAX_FILE;
+  if (bytes.length > cap) return problem(`The ${where} was left out: it is ${mbText(bytes.length)} and the limit is ${cap / MB} MB.`);
   // The name is made of checked slugs and a whole number only (none of them can hold "__" or a slash).
-  const file = `${p.slug}__round-${r.number}__${o.slug}.${kind}`;
+  const file = `${p.slug}__round-${r.number}__${o.slug}${kind === 'wordsrc' ? '__wordsrc.json' : `.${kind}`}`;
   fs.writeFileSync(path.join(outDir, file), bytes);
   files.push({ project: p.slug, round: r.number, option: o.slug, kind, file, sha256: sha256(bytes), size: bytes.length, pages });
 }
@@ -161,6 +182,25 @@ function reserve(dir, names, cap) {
 }
 const timeLeft = () => BUDGET_MS - (Date.now() - started);
 
+// ---- Word source --------------------------------------------------------------------------------
+// words[i] is { word, figures } for page i (names already compared with the ones made from the page number),
+// or null. All the sizes are read from the file system first, the files are read as plain files only, and
+// word-src.mjs checks every byte of what comes out of them (JSON schema and caps, every picture a real PNG).
+// Any failure throws, and then there is no Word copy for this option (and a plain problem), nothing else.
+async function wordFor({ p, r, o, tag, dir, expected, words }) {
+  const gap = expected.findIndex((_, i) => !words[i]);
+  if (gap >= 0) throw new Error(words.every((w) => !w) ? 'the text of the pages was not read' : `the text of "${expected[gap].name}" was not read`);
+  const names = words.flatMap((w) => [[w.word, CAPS.pageJson], ...w.figures.map((f) => [f, CAPS.figBytes])]);
+  reserve(dir, names, MAX_WORD_READ);
+  const pagesIn = words.map((w, i) => {
+    let doc;
+    try { doc = JSON.parse(readPlain(dir, w.word, CAPS.pageJson).toString('utf8')); } catch (e) { throw new Error(`${w.word} could not be read (${String(e.message).split('\n')[0].slice(0, 80)})`); }
+    return { name: expected[i].name, doc, figures: w.figures.map((f) => readPlain(dir, f, CAPS.figBytes)) };
+  });
+  const bytes = buildWordSource({ title: p.name, pages: pagesIn, note: (m) => problem(`${tag}: ${m}`) });
+  keep({ p, r, o, kind: 'wordsrc', bytes, pages: 0 });
+}
+
 const plan = exportPlan(studio, problem);      // newest rounds first; nothing else from studio.json reaches a path
 const late = [];                               // options not started because the time for this run was used up
 const notPrinted = [];                         // options exports.mjs did not start for lack of time
@@ -177,8 +217,14 @@ for (const it of plan) {
   if (m.skipped) { notPrinted.push(it); continue; }
   for (const n of m.notes) problem(`${tag}: ${n}`);
   if (m.why) { problem(`No PDF or PowerPoint for ${tag}: ${m.why}.`); continue; }
+  // Word source (proposals and documents), after the PDF and independent of it: one can be made without the other.
+  const word = async () => {
+    if (!WORD_TYPES.includes(p.type) || !expected.length) return;
+    try { await wordFor({ p, r, o, tag, dir, expected, words: m.words }); } catch (e) { problem(`No Word copy for ${tag}: ${String(e.message).split('\n')[0]}.`); }
+  };
   if (m.ok.length < expected.length || !expected.length) {
     problem(`No PDF${p.type === 'presentation' ? ' or PowerPoint' : ''} for ${tag}: ${m.ok.length} of ${expected.length} pages could be made.`);
+    await word();
     continue;
   }
   // PDF (every type)
@@ -210,6 +256,7 @@ for (const it of plan) {
       keep({ p, r, o, kind: 'pptx', bytes: res.bytes, pages: res.pages });
     } catch (e) { problem(`No PowerPoint for ${tag}: ${String(e.message).split('\n')[0]}.`); }
   }
+  await word();
 }
 if (notPrinted.length) problem(`Not made, because the time for printing pages ran out first: ${roundsText(notPrinted)}. The downloads Studio already has for them stay.`);
 if (late.length) problem(`Not made, because the time for making files (${Math.round(BUDGET_MS / 60e3) || '<1'} minute${BUDGET_MS >= 90e3 ? 's' : ''}) ran out first: ${roundsText(late)}. The downloads Studio already has for them stay.`);
