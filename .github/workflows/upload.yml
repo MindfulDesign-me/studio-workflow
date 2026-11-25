@@ -3,14 +3,15 @@
 #
 #   jobs:
 #     studio:
-#       uses: MindfulDesign-me/studio-workflow/.github/workflows/upload.yml@v1
+#       uses: MindfulDesign-me/studio-workflow/.github/workflows/upload.yml@v2
 #       permissions: { contents: read, id-token: write }
 #
 # Studio trusts uploads only from this file at the pinned tag (the OIDC claim job_workflow_ref), so
-# editing a client repo's copy changes nothing Studio trusts. Four jobs, so designer code never runs
+# editing a client repo's copy changes nothing Studio trusts. Five jobs, so designer code never runs
 # where the upload token can be asked for (review M12):
 #   build   runs the repo's build. No token.
 #   shots   renders the built pages for screenshots (runs the designs' JavaScript). No token.
+#   exports builds the PDF and PowerPoint downloads from what shots printed (untrusted input). No token.
 #   studio  runs only this repo's pinned code, with Node and no packages: checks, upload. Has the token.
 #   report  tells Studio when any of them failed (review B3).
 # Actions are pinned to commit SHAs (v4 releases).
@@ -41,7 +42,7 @@ jobs:
       # This repo (studio-workflow) is public: it holds no secrets, and public is what lets every
       # client repo's runner check it out.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v2, path: .studio, persist-credentials: false }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 22 }
       - name: Install the repo's packages (only if it has a lockfile)
@@ -54,7 +55,7 @@ jobs:
   shots:
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     continue-on-error: true   # screenshots are nice to have; a save never fails for want of them
     permissions:
       contents: read
@@ -62,7 +63,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { persist-credentials: false }
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v2, path: .studio, persist-credentials: false }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { name: dist, path: dist }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -75,9 +76,44 @@ jobs:
         run: mkdir -p shots && (node .studio/scripts/shots.mjs studio.json dist shots > shots/screenshots.json || echo '[]' > shots/screenshots.json)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with: { name: shots, path: shots, retention-days: 3 }
+      # Downloads, step 1: print each page of proposals, documents and decks (this job runs the designs'
+      # code, so it writes only inert pictures and pages; the next job builds the real files from them).
+      - name: Downloads, pages
+        continue-on-error: true
+        run: node .studio/scripts/exports.mjs studio.json dist exports-src
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: exports-src, path: exports-src, retention-days: 1, if-no-files-found: ignore }
+
+  # Downloads, step 2: build the PDF and PowerPoint files from what the shots job printed, which is
+  # treated as untrusted (assemble.mjs checks every file). No token here, no designs' code: the only
+  # job with packages. A failure here only means no downloads; a save never fails for want of them.
+  exports:
+    needs: [build, shots]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v2, path: .studio, persist-credentials: false }
+      - name: Get studio.json (read only, never run)
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with: { path: repo, persist-credentials: false }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with: { name: exports-src, path: exports-src }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with: { node-version: 22 }
+      - run: npm ci --prefix .studio --ignore-scripts
+      - name: Downloads, files
+        run: node .studio/scripts/assemble.mjs repo/studio.json exports-src exports
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with: { name: exports, path: exports, retention-days: 1, if-no-files-found: ignore }
 
   studio:
-    needs: [build, shots]
+    needs: [build, shots, exports]
     if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -87,7 +123,7 @@ jobs:
     steps:
       - name: Get Studio's own code (pinned)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v2, path: .studio, persist-credentials: false }
       - name: Get studio.json and the files to scan for secrets (read only, never run)
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with: { path: repo, persist-credentials: false }
@@ -96,13 +132,16 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         continue-on-error: true
         with: { name: shots, path: shots }
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with: { name: exports, path: exports }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 22 }
       - name: Checks
         run: node .studio/scripts/check.mjs repo/studio.json dist repo > checks.json
       - name: Upload to MindfulStudio
         env: { COMMIT_MESSAGE: "${{ github.event.head_commit.message }}" }
-        run: node .studio/scripts/upload.mjs repo/studio.json dist checks.json shots/screenshots.json
+        run: node .studio/scripts/upload.mjs repo/studio.json dist checks.json shots/screenshots.json exports/exports.json
 
   report:
     needs: [build, shots, studio]
@@ -114,7 +153,7 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with: { repository: MindfulDesign-me/studio-workflow, ref: v1, path: .studio, persist-credentials: false }
+        with: { repository: MindfulDesign-me/studio-workflow, ref: v2, path: .studio, persist-credentials: false }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with: { node-version: 22 }
       - name: Tell Studio it failed

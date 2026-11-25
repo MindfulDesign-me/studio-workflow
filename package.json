@@ -5,6 +5,9 @@
   "type": "module",
   "description": "MindfulStudio's shared GitHub Actions workflow: build, checks, screenshots, upload.",
   "dependencies": {
-    "playwright": "1.64.1"
+    "jszip": "3.10.1",
+    "pdf-lib": "1.17.1",
+    "playwright": "1.64.1",
+    "pptxgenjs": "4.0.1"
   }
 }
