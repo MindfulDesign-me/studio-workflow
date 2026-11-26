@@ -13,6 +13,8 @@ const SERVER = (process.env.STUDIO_URL || 'https://studio.mindfuldesign.me').rep
 const studioRaw = JSON.parse(fs.readFileSync(studioFile, 'utf8'));
 const studio = readStudio(studioFile);
 const hashOf = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
+// A render (render.yml): Studio asked for this save to be rendered again, and names it with a ticket.
+const RENDER = process.env.STUDIO_RENDER_TICKET ? { 'x-studio-render': process.env.STUDIO_RENDER_TICKET } : {};
 const where = new Map();
 const files = [];
 for (const rel of walk(dist)) {
@@ -88,7 +90,7 @@ async function call(method, url, body, auth, type, soft = false) {
   for (let attempt = 1; ; attempt++) {
     const bearer = typeof auth === 'function' ? await auth() : auth;
     let res;
-    try { res = await fetch(SERVER + url, { method, headers: { authorization: `Bearer ${bearer}`, ...(type ? { 'content-type': type } : {}) }, body, signal: AbortSignal.timeout(120e3) }); } catch (e) {
+    try { res = await fetch(SERVER + url, { method, headers: { authorization: `Bearer ${bearer}`, ...RENDER, ...(type ? { 'content-type': type } : {}) }, body, signal: AbortSignal.timeout(120e3) }); } catch (e) {
       if (attempt < 3) { await new Promise((r) => setTimeout(r, attempt * 3000)); continue; }
       return stop(`Couldn't reach Studio: ${e.message}`);
     }
